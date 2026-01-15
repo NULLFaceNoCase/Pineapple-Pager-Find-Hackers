@@ -6,26 +6,30 @@
 
 # ---- FILES ----
 LOOT_DIR="/root/loot/find-hackers/"
+RECON_OUTPUT_JSON="/root/loot/find-hackers/all_aps.json"
 
 # ---- BLE ----
 BLE_IFACE="hci0"
+BLE_SCAN_SECONDS=30
 BT_TIMEOUT="20s"
 
 # ---- WIFI ----
 # Min amount an AP needs to change it's SSID to qualify as spoofing
 MIN_SPOOFING_COUNT=5
 SLEEP_BETWEEN_SCANS=15 # Time to restart wifi and bluetooth searches
-aps=()
 
 # ---- REGEX ----
 VALID_MAC="([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"
-PINEAPPLE_DEFAULT_AP="^pineapple_[0-9A-Fa-f]{4}$"
+
+declare -a AP_RESULTS
+# List of MACs that are spoofing SSIDs
+declare -A SPOOFING_MACS
 
 cleanup() {
     killall hcitool 2>/dev/null
     log_to_file "find-hackers stopped"
     sleep 0.5
-    exit
+    exit 0
 }
 
 setup() {
@@ -38,105 +42,206 @@ log_to_file() {
     printf "[$(date +%s)] $msg\n" >> "$LOOT_DIR/collector.log"
 }
 
-# Get access points using "_pineap RECON"
-get_aps() {
-    local search_type="$1"
-    local ssid="$2"
-    declare -A tmp
-    aps=()
-    
-	pineap_cmd=(_pineap RECON "$search_type")
-	
-	if [[ -n $ssid ]]; then
-	    pineap_cmd+=("$ssid")
-	fi
+get_aps_json() {
+    _pineap RECON APS format=json | jq '.' > "$RECON_OUTPUT_JSON"
+}
 
-    # Read _pineap output line by line
-    while IFS= read -r line; do
-        local mac
-		mac=$(echo "$line" | grep -Eo "^$VALID_MAC")
+search_ssid_json() {
+    local mode="$1"
+    local search_ssid="$2"
 
-        if [ -n "$mac" ]; then
-            if [ -z "${tmp[$mac]}" ]; then
-                tmp[$mac]="$line"
-            else
-                tmp[$mac]="${tmp[$mac]}"$'\n'"$line"
-            fi
-            current_mac="$mac"
+    local jq_filter
+    local match=""
+
+    if [[ -z "$search_ssid" ]]; then
+        # No SSID provided: return all objects
+        jq_filter='
+        .[]
+        | {
+            mac: .mac,
+            packets: .packets,
+            all_ssids: (
+                [
+                    (.beacon[]? | {ssid, channel, hidden, freq, signal, time, count}),
+                    (.response[]? | {ssid, channel, hidden, freq, signal, time, count})
+                ]
+                | unique_by(.ssid)
+            )
+        }
+        '
+    else
+        # Determine match filter
+        if [[ "$mode" == "SEARCH" ]]; then
+            match='. == $ssid'
+        elif [[ "$mode" == "ISEARCH" ]]; then
+            match='(. | ascii_downcase) == ($ssid | ascii_downcase)'
+        elif [[ "$mode" == "SUBSTRING" ]]; then
+            match='contains($ssid)'
+        elif [[ "$mode" == "ISUBSTRING" ]]; then
+            match='ascii_downcase | contains($ssid | ascii_downcase)'
         else
-            tmp[$current_mac]="${tmp[$current_mac]}"$'\n'"$line"
+            echo "Invalid mode. Use SEARCH, ISEARCH, SUBSTRING, or ISUBSTRING"
+            return 1
         fi
-    done < <("${pineap_cmd[@]}")
 
-    # Copy tmp to global array
-    for mac in "${!tmp[@]}"; do
-        aps+=("${tmp[$mac]}")
+        jq_filter="
+        .[]
+        | select(
+            ([ (.beacon[]? | .ssid), (.response[]? | .ssid) ] | any($match))
+        )
+        | {
+            mac: .mac,
+            packets: .packets,
+            all_ssids: (
+                [
+                    (.beacon[]? | {ssid, channel, hidden, freq, signal, time, count}),
+                    (.response[]? | {ssid, channel, hidden, freq, signal, time, count})
+                ]
+                | unique_by(.ssid)
+            )
+        }
+        "
+    fi
+
+    mapfile -t AP_RESULTS < <(jq -c --arg ssid "$search_ssid" "$jq_filter" "$RECON_OUTPUT_JSON")
+}
+
+alert_sus_aps() {
+    for ap_json in "${AP_RESULTS[@]}"; do
+        mac=$(jq -r '.mac' <<< "$ap_json")
+        ssid_count=$(jq '.all_ssids | length' <<< "$ap_json")
+
+        # All SSIDS in a string
+        mapfile -t ssids < <(jq -r '.all_ssids[].ssid' <<< "$ap_json")
+		# Check if AP changed SSID but has NOT met the spoofing threshold
+	    if (( ssid_count > 1 && ssid_count < $MIN_SPOOFING_COUNT )); then
+            log_to_file "Sus SSID that has changed names SSID List: ${ssids[*]} MAC: $mac"
+		    LOG "Sus SSID that has changed names\nSSID List: ${ssids[*]}\nMAC: $mac\n"
+		    ALERT "Sus SSID that has changed names\nSSID List: ${ssids[*]}\nMAC: $mac"
+		elif (( ssid_count == 1 )); then
+            channel=$(jq -r '.all_ssids[0]?.channel // empty' <<< "$ap_json")
+            hidden=$(jq -r ".all_ssids[0]?.hidden // empty" <<< "$ap_json")
+            signal=$(jq -r ".all_ssids[0]?.signal // empty" <<< "$ap_json")
+            log_to_file "Sus SSID SSID: ${ssids[*]} MAC: $mac Channel: $channel Signal: $signal Hidden: $hidden"
+		    LOG "Sus SSID\nSSID: ${ssids[*]}\nMAC: $mac\n Channel: $channel\n Signal: $signal\n Hidden: $hidden\n"
+		    ALERT "Sus SSID\nSSID: ${ssids[*]}\nMAC: $mac\n Channel: $channel\n Signal: $signal\n Hidden: $hidden"
+        elif (( ssid_count > 1 && ssid_count >= $MIN_SPOOFING_COUNT )); then
+            log_to_file "Sus SSID that is spoofing SSIDs skipping SSID list MAC: $mac"
+		    LOG "Sus SSID that is spoofing SSIDs skipping SSID list\nMAC: $mac\n"
+        fi
     done
 }
 
-# Alert on suspicous SSIDs
-alert_sus_aps() {
-	for i in "${!aps[@]}"; do
-		mapfile -t SSIDS < <(
-		    echo "${aps[$i]}" \
-		    | grep -E "B|R" \
-		    | sed -E "s/.*'([^']+)'.*/\1/" \
-		    | sort -u
-		)
-		
-		MAC=$(echo "${aps[$i]}" | egrep "$VALID_MAC" | awk '{print $1}')
-		
-		if [ -z "$MAC" ]; then
-	        MAC="UNKNOWN"
-	    fi
-		
-		# Check if AP changed SSID and keeps its MAC
-	    if (( ${#SSIDS[@]} > 1 )); then
-            log_to_file "Found a sus SSID that has changed names SSID List: ${SSIDS[*]} MAC: $MAC"
-		    LOG "Found a sus SSID that has changed names\nSSID List: ${SSIDS[*]}\nMAC: $MAC\n"
-		    ALERT "Found a sus SSID that has changed names\nSSID List: ${SSIDS[*]}\nMAC: $MAC"
-		else
-            log_to_file "Found a sus SSID SSID: ${SSIDS[*]} MAC: $MAC"
-		    LOG "Found a sus SSID\nSSID: ${SSIDS[*]}\nMAC: $MAC\n"
-		    ALERT "Found a sus SSID\nSSID: ${SSIDS[*]}\nMAC: $MAC"
-		fi
-	done
-}
+alert_aps_spoofing_ssids() {
+    spoof_count=0
+    for ap_json in "${AP_RESULTS[@]}"; do
+        mac=$(jq -r '.mac' <<< "$ap_json")
+        ssid_count=$(jq '.all_ssids | length' <<< "$ap_json")
 
-# Log and alert on spoofing SSIDs
-log_aps_spoofing_ssids() {
-	spoof_count=0
-	for i in "${!aps[@]}"; do
-		mapfile -t SSIDS < <(
-		    echo "${aps[$i]}" \
-		    | grep -E "B|R" \
-		    | sed -E "s/.*'([^']+)'.*/\1/" \
-		    | sort -u
-		)
-		
-		MAC=$(echo "${aps[$i]}" | egrep "$VALID_MAC" | awk '{print $1}')
-		
-		if [ -z "$MAC" ]; then
-	        MAC="UNKNOWN"
-	    fi
-
-	    if (( ${#SSIDS[@]} > $MIN_SPOOFING_COUNT )); then
+	    if (( ssid_count >= $MIN_SPOOFING_COUNT )); then
 			# Get all SSIDs being spoofed and save to an output file
 			dt=$(date +%s)
-			output_file="${LOOT_DIR%/}/${dt}_${MAC}_ssid_pool.txt"
+			output_file="${LOOT_DIR%/}/${dt}_${mac}_ssid_pool.txt"
 
-		    for ssid in "${SSIDS[@]}"; do
-		        echo "$ssid" >> $output_file
-		    done
+            for ((i = 0; i < ssid_count; i++)); do
+                ssid=$(jq -r ".all_ssids[$i].ssid" <<< "$ap_json")
+                echo "$ssid" >> $output_file
+            done
 
-            log_to_file "Found a sus AP spoofing ${#SSIDS[@]} with MAC: $MAC networks SSID Pool saved to $output_file"
-		    LOG "Found a sus AP spoofing ${#SSIDS[@]} networks\nMAC: $MAC\nSSID pool saved to $output_file"
-		    LOG "Found a sus AP spoofing ${#SSIDS[@]} networks\nMAC: $MAC\nSSID pool saved to $output_file"
+            # Add MAC to list - will ignore these in evil twins
+            SPOOFING_MACS["$mac"]=1
+
+            log_to_file "Sus AP spoofing $ssid_count networks SSID Pool saved to $output_file MAC: $mac"
+		    LOG "Sus AP spoofing $ssid_count networks\nSSID Pool saved to $output_file\nMAC: $mac"
+		    ALERT "Sus AP spoofing $ssid_count networks\nSSID Pool saved to $LOOT_DIR\nMAC: $mac"
 		    ((spoof_count++))
 		fi
-	done
+    done
     log_to_file "Found $spoof_count APs spoofing atleast $MIN_SPOOFING_COUNT networks"
 	LOG "Found $spoof_count APs spoofing atleast $MIN_SPOOFING_COUNT networks\n"
+}
+
+# Extract OUI (manufacturer info) from a MAC address's first 3 bytes
+get_oui() {
+    echo "${1,,}" | cut -d: -f1-3
+}
+
+alert_evil_twin() {
+    declare -A ssid_to_macs
+
+    for ap_json in "${AP_RESULTS[@]}"; do
+        mac=$(jq -r '.mac' <<< "$ap_json")
+        mapfile -t ssids < <(jq -r '.all_ssids[].ssid' <<< "$ap_json")
+
+        for ssid in "${ssids[@]}"; do
+            if [[ -z "$ssid" ]]; then
+                log_to_file "Skipping empty SSID with MAC: $mac"
+                continue
+            fi
+            # Append MAC to the list for this SSID
+            if [[ -n "${ssid_to_macs["$ssid"]}" ]]; then
+                ssid_to_macs["$ssid"]+=",${mac}"
+            else
+                ssid_to_macs["$ssid"]="$mac"
+            fi
+        done
+    done
+
+    # Check for SSIDs with multiple MACs
+    evil_count=0
+    for ssid in "${!ssid_to_macs[@]}"; do
+        IFS=',' read -ra macs <<< "${ssid_to_macs[$ssid]}"
+        if (( ${#macs[@]} > 1 )); then
+            declare -A oui_count=()
+            declare -A oui_macs=()
+            declare -A sus_macs=()
+
+            # Count OUIs for all MACs, are they all using same equipment?
+            for mac in "${macs[@]}"; do
+                # Ignore spoofing MACs
+                if [[ ${SPOOFING_MACS[$mac]} ]]; then
+                    continue
+                fi
+                oui=$(get_oui "$mac")
+                ((oui_count[$oui]++))
+                oui_macs[$oui]+="${oui_macs[$oui]:+,}$mac"
+            done
+
+            # Find MACs with OUI (manufacturer bytes) that are unique
+            for oui in "${!oui_count[@]}"; do
+                if (( oui_count[$oui] < 2 )); then
+                    sus_macs[$oui]+="${sus_macs[$oui]:+,}${oui_macs[$oui]}"
+                fi
+            done
+
+            # If only one suspicous MAC
+            if (( ${#sus_macs[@]} == 1 )); then
+                log_to_file "Potential evil twin SSID: $ssid SUS MAC: ${sus_macs[@]} All MACs: ${ssid_to_macs[$ssid]}"
+                LOG "Potential evil twin for SSID: $ssid\n SUS MAC: ${sus_macs[@]}\n All MACs: ${ssid_to_macs[$ssid]}\n"
+                ALERT "Potential evil twin\nSSID: $ssid\n SUS MAC: ${sus_macs[@]}\n All MACs: ${ssid_to_macs[$ssid]}\n"
+            # If only 2 MACs and they are diff manufacturers
+            elif (( ${#sus_macs[@]} == 2 )); then
+                # Replace MAC string delimiter with spaces for printing
+                all_macs=$(echo "${ssid_to_macs[$ssid]}" | tr ',' ' ')
+                log_to_file "Potential evil twin for SSID: $ssid All MACs: $all_macs"
+                LOG "Potential evil twin for SSID: $ssid\nAll MACs: $all_macs\n"
+                ALERT "Potential evil twin\nSSID: $ssid\nAll MACs: $all_macs\n"
+            # Don't alert if there are multiple sus MACs could be valid APs using different equipment
+            else
+                # Replace MAC string delimiter with spaces for printing
+                all_macs=$(echo "${ssid_to_macs[$ssid]}" | tr ',' ' ')
+                log_to_file "Multiple MACs using the same SSID: $ssid All MACs: $all_macs"
+            fi
+
+            # Evil twin count
+            if (( ${#sus_macs[@]} == 1 || ${#sus_macs[@]} == 2 )); then
+                ((evil_count++))
+            fi
+        fi
+    done
+
+	log_to_file "Found $evil_count potential evil twins"
+	LOG "Found $evil_count potential evil twins\n"
 }
 
 alert_flipper_bt() {
@@ -157,28 +262,47 @@ alert_flipper_bt() {
 	# Alert for each BT Flipper device found
 	if (( ${#bt_flippers[@]} > 0 )); then
 	    for flipper in "${bt_flippers[@]}"; do
-			MAC=$(echo "$flipper" | grep -Eo "$VALID_MAC")
-			NAME=$(echo "$flipper" | cut -d' ' -f2-)
+			mac=$(echo "$flipper" | grep -Eo "$VALID_MAC")
+			name=$(echo "$flipper" | cut -d' ' -f2-)
 
-            log_to_file "Flipper device found BT Name: $NAME BT MAC: $MAC"
-			LOG "Flipper device found\nBT Name: $NAME\nBT MAC: $MAC"
-			ALERT "Flipper device found\nBT Name: $NAME\nBT MAC: $MAC"
+            log_to_file "Flipper device found BT Name: $name BT MAC: $mac"
+			LOG "Flipper device found\nBT Name: $name\nBT MAC: $mac"
+			ALERT "Flipper device found\nBT Name: $name\nBT MAC: $mac"
 	    done
 	fi
 }
 
 # Pager default APs
 find_pagers() {
-    # Management AP default name
-    get_aps "ISEARCH" "pager"
-    log_to_file "Found ${#aps[@]} APs with SSID 'pager'"
-    LOG "Found ${#aps[@]} APs with SSID 'pager'"
+    log_to_file "Searching for Hak5 WiFi Pager devices.."
+    LOG "Searching for Hak5 WiFi Pager devices.\n"
+    # Management AP default name = pager, Open AP default name pager_open or pager-open
+    search_ssid_json "ISUBSTRING" "pager"
+    log_to_file "Found ${#AP_RESULTS[@]} APs with substring 'pager'"
+    LOG "Found ${#AP_RESULTS[@]} APs with substring 'pager'\n"
     alert_sus_aps
+}
 
-    # Open AP default name
-    get_aps "ISEARCH" "pager_open"
-    log_to_file "Found ${#aps[@]} APs with SSID 'pager_open'"
-    LOG "Found ${#aps[@]} APs with SSID 'pager_open'"
+# Wifi Pineapple default APS
+find_pineapples() {
+    # Pineapple_XXXX
+    log_to_file "Searching for Hak5 WiFi Pineapple devices.."
+    LOG "Searching for Hak5 WiFi Pineapple devices.\n"
+    search_ssid_json "ISUBSTRING" "pineapple"
+    log_to_file "Found ${#AP_RESULTS[@]} APs with substring 'pineapple'"
+    LOG "Found ${#AP_RESULTS[@]} APs with substring 'pineapple'\n"
+    alert_sus_aps
+}
+
+# Orbic RC400L device - Hotspot device most commonly used with rayhunter software
+# Can be a false positive and be used as a normal hotspot without software
+find_rayhunters() {
+    log_to_file "Searching for stingray hunter devices.."
+    LOG "Searching for stingray hunter devices..\n"
+    # Default SSID for Orbic RC400L device
+    search_ssid_json "ISUBSTRING" "RC400L"
+    log_to_file "Found ${#AP_RESULTS[@]} APs with substring 'RC400L'"
+    LOG "Found ${#AP_RESULTS[@]} APs with substring 'RC400L'\n"
     alert_sus_aps
 }
 
@@ -187,16 +311,16 @@ find_pagers() {
 find_spoofing_aps() {
     log_to_file "Searching for APs spoofing networks.."
     LOG "Searching for APs spoofing networks..\n"
-    get_aps "APS"
-    log_aps_spoofing_ssids
+    search_ssid_json "" ""
+    alert_aps_spoofing_ssids
 }
 
-# Wifi Pineapple default device setup AP
-find_pineapples() {
-    get_aps "IRSEARCH" "$PINEAPPLE_DEFAULT_AP"
-    log_to_file "Found ${#aps[@]} APs with SSID 'Pineapple_XXXX'"
-    LOG "Found ${#aps[@]} APs with SSID 'Pineapple_XXXX'\n"
-    alert_sus_aps
+# Find evil twins
+# Using AP_RESULTS from find_spoofing_aps
+find_evil_twins() {
+    log_to_file "Searching for evil twin APs.."
+    LOG "Searching for evil twin APs.."
+    alert_evil_twin
 }
 
 # Flipper default bluetooth name
@@ -210,14 +334,21 @@ find_flippers() {
 # Trap signals: Ensures cleanup runs on Exit, Ctrl+C (SIGINT) or Kill (SIGTERM)
 # SOURCE: oMen (BT Pager Warden payload)
 trap cleanup EXIT SIGINT SIGTERM
-
 setup
 
 while true; do
+    # Get all APs and save to a JSON file
+    get_aps_json
+
+    # Search for hacking devices
     find_pagers
     find_pineapples
+    find_rayhunters
     find_spoofing_aps
+    find_evil_twins
     find_flippers
+
+    # Wait until next scan
     sleep "$SLEEP_BETWEEN_SCANS"
-    LOG "\n"
+    LOG "\n\n"
 done
