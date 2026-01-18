@@ -64,20 +64,20 @@ BT Detection
 
 - Log location: (appends to file on each run)
     ```
-    /root/loot/find-hackers/collector.log
+    /root/loot/find_hackers/collector.log
     ```
 
     *Timestamps are in Epoch*
 
 - JSON file containing APs from recon (rewritten on each run)
     ```
-    /root/loot/find-hackers/all_aps.json
+    /root/loot/find_hackers/all_aps.json
     ```
 
 
 - Karma attack AP's ssid pool
     ```
-    /root/loot/find-hackers/<EPOCH_DATETIME>_<MAC>_ssid_pool.txt
+    /root/loot/find_hackers/<EPOCH_DATETIME>_<MAC>_ssid_pool.txt
     ```
 
     *If an AP is found to be spoofing SSID names like a Karma attack, a file will be created of all of the SSID names. This can contain SSIDs pulled in from a Pineapple Pager's SSID pool and could potentially be used to track a hacker's movements using
@@ -89,8 +89,8 @@ BT Detection
 Static variables at top of file and can be updated.
 ```bash
 # ---- FILES ----
-LOOT_DIR="/root/loot/find-hackers/"
-RECON_OUTPUT_JSON="/root/loot/find-hackers/all_aps.json"
+LOOT_DIR="/root/loot/find_hackers"
+RECON_OUTPUT_JSON="/root/loot/find_hackers/all_aps.json"
 RECON_DB="/root/recon/recon.db"
 
 # ---- BLE ----

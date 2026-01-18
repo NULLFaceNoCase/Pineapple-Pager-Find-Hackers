@@ -5,8 +5,8 @@
 # Version: 1.0
 
 # ---- FILES ----
-LOOT_DIR="/root/loot/find-hackers/"
-RECON_OUTPUT_JSON="/root/loot/find-hackers/all_aps.json"
+LOOT_DIR="/root/loot/find_hackers/"
+RECON_OUTPUT_JSON="/root/loot/find_hackers/all_aps.json"
 RECON_DB="/root/recon/recon.db"
 
 # ---- BLE ----
@@ -28,14 +28,14 @@ declare -A SPOOFING_MACS
 
 cleanup() {
     killall hcitool 2>/dev/null
-    log_to_file "find-hackers stopped"
+    log_to_file "find_hackers stopped"
     sleep 0.5
     exit 0
 }
 
 setup() {
     mkdir -p "$LOOT_DIR"
-    log_to_file "find-hackers starting.. loot = $LOOT_DIR"
+    log_to_file "find_hackers starting.. loot = $LOOT_DIR"
 }
 
 log_to_file() {
