@@ -1,7 +1,7 @@
 # Find Hackers 
 WiFi + BLE passive hacker detection payload for Hak5 Pineapple Pager. 
 
-Designed for the **Hak5 Pineapple Pager**, capable of detecting suspicious network and Bluetooth activity and identifying nearby devices that may resemble and operate like common hacking tools (Pineapple Pager, WiFi Pineapple, Flipper device, stingray hunter).
+Designed for the **Hak5 Pineapple Pager**, capable of detecting suspicious network and Bluetooth activity and identifying nearby devices that may resemble and operate like common hacking tools (Pineapple Pager, WiFi Pineapple, Flipper Zero, stingray hunter).
 
 > **For authorized security research, red-teaming, and situational awareness only.**  
 > You are responsible for complying with all laws in your region.
