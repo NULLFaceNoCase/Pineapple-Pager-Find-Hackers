@@ -7,6 +7,7 @@
 # ---- FILES ----
 LOOT_DIR="/root/loot/find-hackers/"
 RECON_OUTPUT_JSON="/root/loot/find-hackers/all_aps.json"
+RECON_DB="/root/recon/recon.db"
 
 # ---- BLE ----
 BLE_IFACE="hci0"
@@ -166,6 +167,50 @@ get_oui() {
     echo "${1,,}" | cut -d: -f1-3
 }
 
+# TODO - Update once encryption is returned from `_pinap RECON`
+# Get the encryption type from a specific BSSID using the SQLITE database
+get_encryption() {
+	local mac="$1"
+    # Remove commas from mac
+    mac=$(echo "$mac" | tr -d ':')
+    encryption=$(sqlite3 $RECON_DB "SELECT encryption FROM ssid WHERE bssid LIKE '$mac' ORDER BY time DESC LIMIT 1;" 2>&1)
+
+    # Check for error if recon is active in GUI - "Error: in prepare, database is locked"
+    if [[ "${encryption,,}" == *error* ]]; then
+        echo "$encryption" >&2
+        return 1
+    fi
+
+    # Encryption not found
+    if [[ -z "$encryption" ]]; then
+        return 2
+    fi
+
+    echo "$encryption"
+    return 0
+}
+
+# Returns 0 if encryption is OPN. Returns 1 if encryption is not OPN.
+is_open_network() {
+	local mac="$1"
+	local enc="$2"
+
+	# No encryption result - could be OPN or anything
+	if [[ -z "$enc" ]]; then
+		echo "AP with MAC: $mac encryption value is missing"
+		return 1
+	fi
+
+	# Encryption is 0 - OPN
+	if [[ "$enc" == "0" ]]; then
+		echo "AP with MAC: $mac has OPN encryption"
+		return 0
+	else
+		echo "AP with MAC: $mac does not have OPN encryption"
+		return 1
+	fi
+}
+
 alert_evil_twin() {
     declare -A ssid_to_macs
 
@@ -200,8 +245,19 @@ alert_evil_twin() {
             for mac in "${macs[@]}"; do
                 # Ignore spoofing MACs
                 if [[ ${SPOOFING_MACS[$mac]} ]]; then
+					log_to_file "Skipping spoofing MAC: $mac"
                     continue
                 fi
+
+				# Ignore OPN APs
+				enc=$(get_encryption $mac)
+				status=$?
+				if [[ $status -eq 0 ]]; then
+					if is_open_network $mac $enc; then
+						log_to_file "Skipping MAC: $mac OPN AP"
+						continue
+					fi
+				fi
                 oui=$(get_oui "$mac")
                 ((oui_count[$oui]++))
                 oui_macs[$oui]+="${oui_macs[$oui]:+,}$mac"
@@ -216,16 +272,15 @@ alert_evil_twin() {
 
             # If only one suspicous MAC
             if (( ${#sus_macs[@]} == 1 )); then
-                log_to_file "Potential evil twin SSID: $ssid SUS MAC: ${sus_macs[@]} All MACs: ${ssid_to_macs[$ssid]}"
-                LOG "Potential evil twin for SSID: $ssid\n SUS MAC: ${sus_macs[@]}\n All MACs: ${ssid_to_macs[$ssid]}\n"
-                ALERT "Potential evil twin\nSSID: $ssid\n SUS MAC: ${sus_macs[@]}\n All MACs: ${ssid_to_macs[$ssid]}\n"
+				all_macs=$(echo "${ssid_to_macs[$ssid]}" | tr ',' ' ')
+                log_to_file "Potential evil twin SSID: $ssid SUS MAC: ${sus_macs[@]} All MACs: $all_macs}"
+                LOG "Potential evil twin for SSID: $ssid\n SUS MAC: ${sus_macs[@]}\n All MACs: $all_macs\n"
             # If only 2 MACs and they are diff manufacturers
             elif (( ${#sus_macs[@]} == 2 )); then
                 # Replace MAC string delimiter with spaces for printing
                 all_macs=$(echo "${ssid_to_macs[$ssid]}" | tr ',' ' ')
                 log_to_file "Potential evil twin for SSID: $ssid All MACs: $all_macs"
                 LOG "Potential evil twin for SSID: $ssid\nAll MACs: $all_macs\n"
-                ALERT "Potential evil twin\nSSID: $ssid\nAll MACs: $all_macs\n"
             # Don't alert if there are multiple sus MACs could be valid APs using different equipment
             else
                 # Replace MAC string delimiter with spaces for printing
@@ -285,7 +340,6 @@ find_pagers() {
 
 # Wifi Pineapple default APS
 find_pineapples() {
-    # Pineapple_XXXX
     log_to_file "Searching for Hak5 WiFi Pineapple devices.."
     LOG "Searching for Hak5 WiFi Pineapple devices.\n"
     search_ssid_json "ISUBSTRING" "pineapple"
