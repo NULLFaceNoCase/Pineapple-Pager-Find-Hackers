@@ -13,6 +13,8 @@ RECON_DB="/root/recon/recon.db"
 BLE_IFACE="hci0"
 BLE_SCAN_SECONDS=30
 BT_TIMEOUT="20s"
+FLIPPER_OUI="0C:FA:22"
+FLIPPER_NAME="flipper"
 
 # ---- WIFI ----
 # Min amount an AP needs to change it's SSID to qualify as spoofing
@@ -23,8 +25,8 @@ SLEEP_BETWEEN_SCANS=15 # Time to restart wifi and bluetooth searches
 VALID_MAC="([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"
 
 declare -a AP_RESULTS
-# List of MACs that are spoofing SSIDs
 declare -A SPOOFING_MACS
+declare -A BT_FLIPPERS
 
 cleanup() {
     killall hcitool 2>/dev/null
@@ -96,7 +98,7 @@ search_ssid_json() {
             all_ssids: (
                 [
                     (.beacon[]? | {ssid, channel, hidden, freq, signal, time, count}),
-                    (.response[]? | {ssid, channel, hidden, freq, signal, time, count})
+                    (.response[]? | {ssid, channel, freq, signal, time, count})
                 ]
                 | unique_by(.ssid)
             )
@@ -121,11 +123,10 @@ alert_sus_aps() {
 		    ALERT "Sus SSID that has changed names\nSSID List: ${ssids[*]}\nMAC: $mac"
 		elif (( ssid_count == 1 )); then
             channel=$(jq -r '.all_ssids[0]?.channel // empty' <<< "$ap_json")
-            hidden=$(jq -r ".all_ssids[0]?.hidden // empty" <<< "$ap_json")
             signal=$(jq -r ".all_ssids[0]?.signal // empty" <<< "$ap_json")
-            log_to_file "Sus SSID SSID: ${ssids[*]} MAC: $mac Channel: $channel Signal: $signal Hidden: $hidden"
-		    LOG "Sus SSID\nSSID: ${ssids[*]}\nMAC: $mac\n Channel: $channel\n Signal: $signal\n Hidden: $hidden\n"
-		    ALERT "Sus SSID\nSSID: ${ssids[*]}\nMAC: $mac\n Channel: $channel\n Signal: $signal\n Hidden: $hidden"
+            log_to_file "Sus SSID SSID: ${ssids[*]} MAC: $mac Channel: $channel Signal: $signal"
+		    LOG "Sus SSID\nSSID: ${ssids[*]}\nMAC: $mac\n Channel: $channel\n Signal: $signal\n\n"
+		    ALERT "Sus SSID\nSSID: ${ssids[*]}\nMAC: $mac\n Channel: $channel\n Signal: $signal\n"
         elif (( ssid_count > 1 && ssid_count >= $MIN_SPOOFING_COUNT )); then
             log_to_file "Sus SSID that is spoofing SSIDs skipping SSID list MAC: $mac"
 		    LOG "Sus SSID that is spoofing SSIDs skipping SSID list\nMAC: $mac\n"
@@ -197,16 +198,14 @@ is_open_network() {
 
 	# No encryption result - could be OPN or anything
 	if [[ -z "$enc" ]]; then
-		echo "AP with MAC: $mac encryption value is missing"
+		log_to_file "AP with MAC: $mac encryption value is missing"
 		return 1
 	fi
 
 	# Encryption is 0 - OPN
 	if [[ "$enc" == "0" ]]; then
-		echo "AP with MAC: $mac has OPN encryption"
 		return 0
 	else
-		echo "AP with MAC: $mac does not have OPN encryption"
 		return 1
 	fi
 }
@@ -303,28 +302,35 @@ alert_flipper_bt() {
 	# Reset Bluetooth adapter to prevent errors/hanging
 	hciconfig hci0 down
 	hciconfig hci0 up
-	
-	# Look for Bluetooth devices with flipper in name. Remove duplicates by MAC.
-	mapfile -t bt_flippers < <(
-		timeout "$BT_TIMEOUT" hcitool -i "$BLE_IFACE" lescan \
-		| awk '!seen[$1]++' \
-		| grep -i "flipper"
-	)
 
-    log_to_file "Found ${#bt_flippers[@]} Bluetooth devices with name 'Flipper'"
-	LOG "Found ${#bt_flippers[@]} Bluetooth devices with name 'Flipper'"
-	
+    while read -r line; do
+        mac=${line%% *}
+        name=${line#"$mac"}
+        name=${name# }
+
+        # Check if MAC is valid
+        if [[ ! $mac =~ $VALID_MAC ]]; then
+            continue
+        fi
+
+        # Add hits, devices that include string "flipper" in name or hardcoded OUI in MAC
+        BT_FLIPPERS[$mac]="$name"
+    done < <(
+        timeout --signal=SIGINT "$BT_TIMEOUT" hcitool -i "$BLE_IFACE" lescan |
+        grep -iE "^${FLIPPER_OUI}|${FLIPPER_NAME}" |
+        sort -u
+    )
+        
 	# Alert for each BT Flipper device found
-	if (( ${#bt_flippers[@]} > 0 )); then
-	    for flipper in "${bt_flippers[@]}"; do
-			mac=$(echo "$flipper" | grep -Eo "$VALID_MAC")
-			name=$(echo "$flipper" | cut -d' ' -f2-)
+    for mac in "${!BT_FLIPPERS[@]}"; do
+        name="${BT_FLIPPERS[$mac]}"
+        log_to_file "Flipper device found BT Name: $name BT MAC: $mac"
+        LOG "Flipper device found\nBT Name: $name\nBT MAC: $mac"
+        ALERT "Flipper device found\nBT Name: $name\nBT MAC: $mac"
+    done
 
-            log_to_file "Flipper device found BT Name: $name BT MAC: $mac"
-			LOG "Flipper device found\nBT Name: $name\nBT MAC: $mac"
-			ALERT "Flipper device found\nBT Name: $name\nBT MAC: $mac"
-	    done
-	fi
+	log_to_file "Found ${#BT_FLIPPERS[@]} potential Flipper Zero devices"
+    LOG "Found ${#BT_FLIPPERS[@]} potential Flipper Zero devices"
 }
 
 # Pager default APs

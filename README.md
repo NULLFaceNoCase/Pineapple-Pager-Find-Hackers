@@ -13,7 +13,7 @@ Designed for the **Hak5 Pineapple Pager**, capable of detecting suspicious netwo
 |--------|-------------|
 | **WiFi SSID Detection** | Uses `_pineap RECON` to search for APs using SSIDs commonly found with Hak5 devices and stingray hunter hotspot |
 | **WiFi Attack Detection** | Searches for spoofing APs and potential evil twins |
-| **BT Detection** | Uses `lescan` for BT filtering |
+| **BLE Detection** | Uses `lescan` for BT filtering |
 | **Continuous Monitor Mode** | Cycles WiFi → BLE → sleep delay — loops forever |
 | **Logging** | Each hit is archived with timestamps |
 | **SSID Pool Loot** | Logs SSID pool of spoofing APs |
@@ -54,7 +54,7 @@ WiFi Attacks Detection
 
 BT Detection
 - Flipper Zero
-    - Search for Bluetooth device names with case insensitive substring "flipper"
+    - Search for Bluetooth device names with case insensitive substring "flipper" and for MAC with OUI equal to "0C:FA:22" for Flipper Devices Inc manufacturer.
     - Alerts? - Yes.
     - False positives - Normal Bluetooth devices may have name containing "flipper". Investigate the device.
 
@@ -97,6 +97,8 @@ RECON_DB="/root/recon/recon.db"
 BLE_IFACE="hci0"
 BLE_SCAN_SECONDS=30
 BT_TIMEOUT="20s"
+FLIPPER_OUI="0C:FA:22"
+FLIPPER_NAME="flipper"
 
 # ---- WIFI ----
 # Min amount an AP needs to change it's SSID to qualify as spoofing
